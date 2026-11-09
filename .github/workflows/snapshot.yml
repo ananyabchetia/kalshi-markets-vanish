@@ -6,11 +6,17 @@ on:
   workflow_dispatch: {}       # lets you trigger it manually from the Actions tab
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: kalshi-snapshot
+  cancel-in-progress: false
 
 jobs:
   snapshot:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -34,3 +40,22 @@ jobs:
           git add data/ docs/
           git diff --staged --quiet || git commit -m "Update snapshot data + dashboard [skip ci]"
           git push
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+  deploy:
+    needs: snapshot
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

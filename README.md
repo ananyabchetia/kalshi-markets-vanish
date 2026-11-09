@@ -58,11 +58,10 @@ GitHub Actions schedules can be delayed during high load. Two things to check:
 
 ## 3. Turn on GitHub Pages for the static dashboard
 
-In the repo, go to Settings → Pages → Build and deployment → Source, set it
-to "Deploy from a branch", and pick branch `main`, folder `/docs`. Save.
-Your dashboard will be live at `https://<you>.github.io/<repo>/` and will
-update automatically each time the scheduled Action commits a fresh
-`docs/index.html`.
+In the repo, go to Settings → Pages → Build and deployment → Source, and
+select "GitHub Actions". The `snapshot.yml` workflow publishes `docs/` after
+each scheduled snapshot run. Your dashboard will be live at
+`https://<you>.github.io/<repo>/`.
 
 ## 3b. (Optional) Deploy the live Streamlit app too
 
