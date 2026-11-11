@@ -3,13 +3,12 @@ Builds a self-contained docs/index.html from the saved snapshot/alert data,
 so the dashboard can be served as a plain static site via GitHub Pages
 (no Streamlit process required).
 
-Charts and tables are rendered client-side with Chart.js (loaded from a
-CDN); the underlying data is embedded directly in the page as JSON.
+The alert history is rendered client-side; the underlying data is embedded
+directly in the page as JSON.
 
 Run this after snapshot_cron.py, or let the GitHub Action run both.
 """
 
-import json
 from pathlib import Path
 
 import pandas as pd
@@ -25,7 +24,6 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 <title>Kalshi Quiet-Removal Monitor</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="300">
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <style>
   body {{ font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 2rem;
           background: #0f1117; color: #e6e6e6; }}
@@ -39,6 +37,15 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   table {{ width: 100%; border-collapse: collapse; font-size: 0.9rem; }}
   th, td {{ text-align: left; padding: 0.5rem 0.7rem; border-bottom: 1px solid #2a2e3a; }}
   th {{ color: #9aa0a6; font-weight: 500; }}
+  input[type="search"], button {{ background: #0f1117; color: #e6e6e6; border: 1px solid #2a2e3a;
+            border-radius: 6px; padding: 0.55rem 0.7rem; }}
+  input[type="search"] {{ box-sizing: border-box; margin: 0 0 1rem; width: min(100%, 32rem); }}
+  button {{ cursor: pointer; }}
+  button:disabled {{ cursor: default; opacity: 0.45; }}
+  .alerts-pagination {{ align-items: center; display: flex; justify-content: space-between;
+            gap: 1rem; margin-top: 1rem; }}
+  .alerts-pagination button + button {{ margin-left: 0.5rem; }}
+  .alerts-page-info {{ color: #9aa0a6; font-size: 0.9rem; }}
   select {{ background: #0f1117; color: #e6e6e6; border: 1px solid #2a2e3a; border-radius: 6px;
             padding: 0.4rem; margin-bottom: 1rem; }}
   .badge {{ padding: 0.15rem 0.5rem; border-radius: 6px; font-size: 0.8rem; }}
@@ -62,54 +69,111 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   </div>
 
   <div class="card">
-    <h3>Open events over time</h3>
-    <canvas id="eventsChart" height="90"></canvas>
-  </div>
-
-  <div class="card">
     <h3>Vanished-event checks</h3>
-    <div id="alertsTableWrap">{alerts_table_html}</div>
+    <label for="alertsSearch">Search vanished events</label><br>
+    <input id="alertsSearch" type="search" placeholder="Search ticker, title, category, or check time">
+    <div id="alertsTableWrap"></div>
+    <div class="alerts-pagination" aria-label="Vanished-event pages">
+      <span id="alertsPageInfo" class="alerts-page-info" aria-live="polite"></span>
+      <div>
+        <button id="alertsNewer" type="button" aria-label="Show newer vanished events">← Newer</button>
+        <button id="alertsOlder" type="button" aria-label="Show older vanished events">Older →</button>
+      </div>
+    </div>
   </div>
 
   <p class="generated">Generated {generated_at} UTC · This page refreshes every 5 minutes.</p>
 
 <script>
-const countsData = {counts_json};
-const ctx = document.getElementById('eventsChart').getContext('2d');
-new Chart(ctx, {{
-  type: 'line',
-  data: {{
-    labels: countsData.map(d => d.snapshot_time),
-    datasets: [{{
-      label: 'Open events',
-      data: countsData.map(d => d.open_events),
-      borderColor: '#7ee08a',
-      backgroundColor: 'rgba(126,224,138,0.15)',
-      tension: 0.2,
-      fill: true,
-    }}]
-  }},
-  options: {{
-    scales: {{
-      x: {{ ticks: {{ color: '#9aa0a6' }}, grid: {{ color: '#2a2e3a' }} }},
-      y: {{ ticks: {{ color: '#9aa0a6' }}, grid: {{ color: '#2a2e3a' }}, beginAtZero: true }}
-    }},
-    plugins: {{ legend: {{ labels: {{ color: '#e6e6e6' }} }} }}
+const alertsData = {alerts_json};
+const ALERTS_PAGE_SIZE = 10;
+let alertsPage = 0;
+const alertsSearch = document.getElementById('alertsSearch');
+const alertsTableWrap = document.getElementById('alertsTableWrap');
+const alertsPageInfo = document.getElementById('alertsPageInfo');
+const alertsNewer = document.getElementById('alertsNewer');
+const alertsOlder = document.getElementById('alertsOlder');
+
+function renderAlerts() {{
+  const query = alertsSearch.value.trim().toLocaleLowerCase();
+  const filteredAlerts = alertsData.filter(alert =>
+    Object.values(alert).some(value => String(value ?? '').toLocaleLowerCase().includes(query))
+  );
+  const pageCount = Math.ceil(filteredAlerts.length / ALERTS_PAGE_SIZE);
+  alertsPage = Math.min(alertsPage, Math.max(pageCount - 1, 0));
+  const start = alertsPage * ALERTS_PAGE_SIZE;
+  const pageAlerts = filteredAlerts.slice(start, start + ALERTS_PAGE_SIZE);
+
+  if (!filteredAlerts.length) {{
+    alertsTableWrap.innerHTML = '<p class="empty">' +
+      (alertsData.length ? 'No vanished events match your search.' : 'No vanished-event checks yet — need at least two snapshots to diff.') +
+      '</p>';
+  }} else {{
+    const table = document.createElement('table');
+    const columns = Object.keys(alertsData[0]);
+    const thead = table.createTHead();
+    const headerRow = thead.insertRow();
+    columns.forEach(column => {{
+      const th = document.createElement('th');
+      th.textContent = column;
+      headerRow.appendChild(th);
+    }});
+
+    const tbody = table.createTBody();
+    pageAlerts.forEach(alert => {{
+      const row = tbody.insertRow();
+      columns.forEach(column => {{
+        const cell = row.insertCell();
+        const value = alert[column];
+        if (column === 'classification' && value) {{
+          const badge = document.createElement('span');
+          badge.className = 'badge ' + value;
+          badge.textContent = value;
+          cell.appendChild(badge);
+        }} else {{
+          cell.textContent = value == null ? '' : String(value);
+        }}
+      }});
+    }});
+    alertsTableWrap.replaceChildren(table);
+  }}
+
+  const firstResult = filteredAlerts.length ? start + 1 : 0;
+  const lastResult = Math.min(start + ALERTS_PAGE_SIZE, filteredAlerts.length);
+  alertsPageInfo.textContent = 'Showing ' + firstResult + '–' + lastResult +
+    ' of ' + filteredAlerts.length + ' matching events (' + alertsData.length + ' total)';
+  alertsNewer.disabled = alertsPage === 0;
+  alertsOlder.disabled = alertsPage >= pageCount - 1;
+}}
+
+alertsSearch.addEventListener('input', () => {{
+  alertsPage = 0;
+  renderAlerts();
+}});
+alertsNewer.addEventListener('click', () => {{
+  if (alertsPage > 0) {{
+    alertsPage -= 1;
+    renderAlerts();
   }}
 }});
+alertsOlder.addEventListener('click', () => {{
+  alertsPage += 1;
+  renderAlerts();
+}});
+renderAlerts();
 </script>
 </body>
 </html>
 """
 
 
-def _alerts_table_html(alerts: pd.DataFrame) -> str:
+def _alerts_json(alerts: pd.DataFrame) -> str:
     if alerts is None or not len(alerts):
-        return '<p class="empty">No vanished-event checks yet — need at least two snapshots to diff.</p>'
+        return "[]"
 
     relevant = alerts[alerts["classification"].isin(["quiet_removal_suspected", "unclear", "early_settlement"])]
     if relevant.empty:
-        return '<p class="empty">No quiet-removal alerts to display.</p>'
+        return "[]"
 
     cols = [
         "checked_at",
@@ -122,20 +186,12 @@ def _alerts_table_html(alerts: pd.DataFrame) -> str:
     ]
     cols = [c for c in cols if c in relevant.columns]
     view = relevant[cols].sort_values("checked_at", ascending=False)
-
-    header = "".join(f"<th>{c}</th>" for c in cols)
-    rows = []
-    for _, r in view.iterrows():
-        cells = []
-        for c in cols:
-            val = r[c]
-            if c == "classification":
-                cells.append(f'<td><span class="badge {val}">{val}</span></td>')
-            else:
-                cells.append(f"<td>{val}</td>")
-        rows.append("<tr>" + "".join(cells) + "</tr>")
-
-    return f"<table><thead><tr>{header}</tr></thead><tbody>{''.join(rows)}</tbody></table>"
+    return (
+        view.to_json(orient="records", date_format="iso")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
 
 
 def build_dashboard() -> Path:
@@ -167,8 +223,7 @@ def build_dashboard() -> Path:
         n_snapshots=len(snapshots),
         latest_count=latest_count,
         n_suspected=n_suspected,
-        alerts_table_html=_alerts_table_html(alerts),
-        counts_json=json.dumps(counts),
+        alerts_json=_alerts_json(alerts),
         generated_at=pd.Timestamp.now("UTC").strftime("%Y-%m-%d %H:%M"),
     )
     out_path.write_text(html)
